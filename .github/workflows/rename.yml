@@ -1,0 +1,83 @@
+name: Native Windows rename reproduction
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Process runs per OS (1-100; each process runs at most 100 rounds)
+        type: number
+        default: 20
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rename:
+    name: MSVC x64 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RUNNER_LABEL: ${{ matrix.os }}
+      TEST_RUNS: ${{ inputs.runs || 20 }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with MSVC and record environment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Path build, metadata | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'MSVC installation not found.' }
+          & "$installation/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          & cl.exe /nologo /O2 /W4 /WX /TC /Fe:build/rename-win32.exe /Fo:build/rename-win32.obj rename-win32.c 2>&1 | Tee-Object -FilePath metadata/build.log
+          if ($LASTEXITCODE -ne 0) { throw "MSVC failed with exit code $LASTEXITCODE" }
+          & dumpbin.exe /nologo /dependents build/rename-win32.exe | Set-Content metadata/dependencies.txt
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed.' }
+          $windows = Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion'
+          [pscustomobject]@{
+            runner_label = $env:RUNNER_LABEL
+            runner_image = $env:ImageOS
+            image_version = $env:ImageVersion
+            os_caption = (Get-CimInstance Win32_OperatingSystem).Caption
+            windows_build = "$($windows.CurrentBuildNumber).$($windows.UBR)"
+            display_version = $windows.DisplayVersion
+            powershell_version = $PSVersionTable.PSVersion.ToString()
+            visual_studio = $installation
+            msvc_tools_version = $env:VCToolsVersion
+            compiler_path = (Get-Command cl.exe).Source
+            source_sha256 = (Get-FileHash rename-win32.c).Hash
+            executable_sha256 = (Get-FileHash build/rename-win32.exe).Hash
+            workspace = $env:GITHUB_WORKSPACE
+            volume = (Get-Volume -DriveLetter ([System.IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE).Substring(0, 1)) | Select-Object DriveLetter, FileSystem, FileSystemLabel)
+          } | ConvertTo-Json -Depth 3 | Set-Content metadata/environment.json
+          Get-Content metadata/environment.json, metadata/dependencies.txt
+
+      - name: Repeat the native executable
+        run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS)
+
+      - name: Upload logs, frequency summary and executable
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rename-${{ matrix.os }}-${{ github.run_attempt }}
+          path: |
+            metadata/
+            results/summary.md
+            results/results.csv
+            results/run-*/stdout.log
+            results/run-*/stderr.log
+            build/rename-win32.exe
+          if-no-files-found: warn
