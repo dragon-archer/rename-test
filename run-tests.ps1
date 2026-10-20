@@ -1,15 +1,14 @@
 param(
-    [ValidateRange(1, 100)][int]$Runs = 20,
+    [ValidateRange(1, 100)][int]$Runs = 5,
     [string]$Executable = "$PSScriptRoot/build/rename-win32.exe",
     [string]$OutputDirectory = "$PSScriptRoot/results",
-    [ValidateRange(0, 32)][int[]]$ScannerCounts = @(16, 0, 1, 4)
+    [ValidateRange(0, 32)][int[]]$ScannerCounts = @(0, 1)
 )
 
 $ErrorActionPreference = 'Stop'
-if (16 -notin $ScannerCounts) { throw 'Keep the 16-scanner positive control.' }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $OutputDirectory = (New-Item -ItemType Directory -Path $OutputDirectory).FullName
-$ScannerCounts = @(16) + @($ScannerCounts | Where-Object { $_ -ne 16 } | Select-Object -Unique)
+$ScannerCounts = @($ScannerCounts | Select-Object -Unique)
 $methods = @('movefile', 'infoex', 'posix')
 $rows = @()
 
@@ -47,7 +46,8 @@ function Read-ProbeResult($output, $exitCode, $method) {
 }
 
 for ($sample = 1; $sample -le $Runs; ++$sample) {
-    foreach ($count in $ScannerCounts) {
+    for ($pressureOffset = 0; $pressureOffset -lt $ScannerCounts.Count; ++$pressureOffset) {
+        $count = $ScannerCounts[($sample - 1 + $pressureOffset) % $ScannerCounts.Count]
         for ($offset = 0; $offset -lt $methods.Count; ++$offset) {
             $method = $methods[($sample - 1 + $offset) % $methods.Count]
             $case = "run-$sample-scanners-$count-$method"
@@ -114,10 +114,10 @@ for ($sample = 1; $sample -le $Runs; ++$sample) {
     }
 }
 
-$signal = @($rows | Where-Object { $_.scanners -eq 16 -and $_.method -eq 'movefile' -and $_.denied -gt 0 }).Count
+$signal = @($rows | Where-Object { $_.scanners -eq 1 -and $_.method -eq 'movefile' -and $_.denied -gt 0 }).Count
 $summary = @(
     "## Rename comparison: $env:RUNNER_LABEL"
-    "High-pressure MoveFileEx reproduction: $signal / $Runs"
+    "Single-scanner MoveFileEx reproduction: $signal / $Runs (if selected)"
     ''
     '| Scanners | Method | Runs with Win32 5 / completed | Win32 5 / attempts | Call failure rate | Other errors | Unsupported runs |'
     '| --- | --- | --- | --- | --- | --- | --- |'
@@ -140,12 +140,12 @@ $summary += @(
     'Each run attempts exactly 100 renames, creating 32 files before each. Success toggles the source name; failure leaves it unchanged.'
     'After failure the next scheduled attempt follows its file workload; there is no immediate retry or recovery loop.'
     'Call rates are observed fractions, not independent probabilities: consecutive failures share a directory and scanner state.'
-    'The 16-scanner group is retained and runs first; API order rotates each sample. All groups share one VM.'
+    'Scanner-count and API order rotate each sample. All groups share one VM; 4/16-scanner pressure is not enabled by default.'
     'infoex/posix differ only by POSIX_SEMANTICS, with absent destination paths. There is no deliberate handle retention.'
     'Artificial scan contention is not proof of the original GCC root cause or a Windows regression. Unsupported is not a pass.'
 )
 $summary | Set-Content -LiteralPath "$OutputDirectory/summary.md" -Encoding utf8
 $summary | ForEach-Object { Write-Host $_ }
 if ($env:GITHUB_STEP_SUMMARY) { $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8 }
-if (-not $signal) { Write-Warning 'High-pressure baseline did not reproduce; do not infer a POSIX mitigation.' }
+if (1 -in $ScannerCounts -and -not $signal) { Write-Warning 'Single-scanner control did not reproduce; do not infer a POSIX mitigation.' }
 if (@($rows | Where-Object other -gt 0).Count) { throw 'Non-target rename errors occurred; inspect results.csv and raw logs.' }

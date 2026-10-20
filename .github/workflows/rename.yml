@@ -1,4 +1,4 @@
-name: Windows rename, Defender and MSYS build comparison
+name: Windows rename and directory access comparison
 
 on:
   push:
@@ -6,9 +6,23 @@ on:
   workflow_dispatch:
     inputs:
       runs:
-        description: Runs per pressure/API and MSYS build group (1-100; 16 scanners retained)
+        description: Runs per zero/single-scanner API group (1-100)
         type: number
-        default: 20
+        default: 5
+        required: true
+      depth_runs:
+        description: Runs per directory location/scope group (1-100)
+        type: number
+        default: 3
+        required: true
+      msys_build:
+        description: Include optional serial/parallel MSYS make and libtool builds
+        type: boolean
+        default: false
+      build_runs:
+        description: Builds per optional MSYS group (1-100)
+        type: number
+        default: 3
         required: true
 
 permissions:
@@ -16,33 +30,28 @@ permissions:
 
 jobs:
   rename:
-    name: ${{ matrix.os }} / Defender ${{ matrix.defender }}
+    name: ${{ matrix.os }} / directory access
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        os: [windows-2022, windows-2025, windows-latest]
-        defender: [as-is, 'on', 'off']
+        os: [windows-2022, windows-2025]
     defaults:
       run:
         shell: pwsh
     env:
-      RUNNER_LABEL: ${{ matrix.os }} / Defender ${{ matrix.defender }}
-      TEST_RUNS: ${{ inputs.runs || 20 }}
+      RUNNER_LABEL: ${{ matrix.os }}
+      TEST_RUNS: ${{ inputs.runs || 5 }}
+      DEPTH_RUNS: ${{ inputs.depth_runs || 3 }}
+      BUILD_RUNS: ${{ inputs.build_runs || 3 }}
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Record original Defender state (hosted CI only)
-        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase before
-
-      - name: Install MSYS build tools
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MSYS
-          update: true
-          install: gcc make libtool
+      - name: Record original Defender state without changing it
+        run: ./ci-defender.ps1 -State as-is -Phase before
 
       - name: Build with MSVC and record environment
         run: |
@@ -60,7 +69,7 @@ jobs:
           $windows = Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion'
           [pscustomobject]@{
             runner_label = $env:RUNNER_LABEL
-            defender_requested = '${{ matrix.defender }}'
+            defender_requested = 'as-is'
             runner_image = $env:ImageOS
             image_version = $env:ImageVersion
             windows_build = "$($windows.CurrentBuildNumber).$($windows.UBR)"
@@ -69,47 +78,69 @@ jobs:
             source_sha256 = (Get-FileHash rename-win32.c).Hash
             executable_sha256 = (Get-FileHash build/rename-win32.exe).Hash
             workspace = $env:GITHUB_WORKSPACE
+            runner_temp = $env:RUNNER_TEMP
+            api_runs = [int]$env:TEST_RUNS
+            depth_runs = [int]$env:DEPTH_RUNS
+            optional_msys_build = '${{ inputs.msys_build }}'
             volume = (Get-Volume -DriveLetter ([System.IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE).Substring(0, 1)) | Select-Object DriveLetter, FileSystem, FileSystemLabel)
+            temporary_volume = (Get-Volume -DriveLetter ([System.IO.Path]::GetPathRoot($env:RUNNER_TEMP).Substring(0, 1)) | Select-Object DriveLetter, FileSystem, FileSystemLabel)
           } | ConvertTo-Json -Depth 3 | Set-Content metadata/environment.json
           Get-Content metadata/environment.json, metadata/dependencies.txt
 
-      - name: Configure and verify Defender experiment
-        id: defender
-        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase configure
+      - name: Record processes and file system filters without changing them
+        run: |
+          Get-Process | Select-Object ProcessName, Id | Sort-Object ProcessName, Id | Export-Csv metadata/processes-before.csv -NoTypeInformation
+          $PSNativeCommandUseErrorActionPreference = $false
+          & fltmc.exe filters 2>&1 | Set-Content metadata/filter-drivers.txt
+          if ($LASTEXITCODE -ne 0) { Write-Warning 'Filter driver enumeration unavailable; see metadata/filter-drivers.txt.' }
+          exit 0
 
-      - name: High-pressure reproduction first, then pressure and POSIX comparison
-        run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS) -ScannerCounts 16,0,1,4
+      - name: Zero and single scanner comparison across rename APIs
+        id: api
+        run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS) -ScannerCounts 0,1
+
+      - name: Directory depth and notification controls in workspace and temporary directory
+        if: ${{ !cancelled() && steps.api.outcome != 'skipped' }}
+        run: ./run-depth-tests.ps1 -Runs ([int]$env:DEPTH_RUNS) -TemporaryParent $env:RUNNER_TEMP
+
+      - name: Install optional MSYS build tools
+        if: ${{ inputs.msys_build == true }}
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: gcc make libtool
 
       - name: MSYS make and libtool build, serial, no artificial scanner
-        if: ${{ !cancelled() && steps.defender.outcome == 'success' }}
+        if: ${{ inputs.msys_build == true }}
         shell: msys2 {0}
-        run: /usr/bin/bash ./run-msys-build.sh "$TEST_RUNS" 1 results-msys-j1
+        run: /usr/bin/bash ./run-msys-build.sh "$BUILD_RUNS" 1 results-msys-j1
 
       - name: MSYS make and libtool build, parallel, no artificial scanner
-        if: ${{ !cancelled() && steps.defender.outcome == 'success' }}
+        if: ${{ inputs.msys_build == true }}
         shell: msys2 {0}
-        run: /usr/bin/bash ./run-msys-build.sh "$TEST_RUNS" 8 results-msys-j8
+        run: /usr/bin/bash ./run-msys-build.sh "$BUILD_RUNS" 8 results-msys-j8
 
-      - name: Record final Defender state and validate treatment
+      - name: Record final Defender state without changing it
         if: always()
-        run: |
-          if ('${{ steps.defender.outcome }}' -eq 'success') {
-            ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase after
-          } else {
-            Write-Warning 'Defender configuration did not succeed; recording status without validating treatment.'
-            ./ci-defender.ps1 -State as-is -Phase after
-          }
+        run: ./ci-defender.ps1 -State as-is -Phase after
 
       - name: Upload logs, frequency summary and executable
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rename-${{ matrix.os }}-defender-${{ matrix.defender }}-${{ github.run_attempt }}
+          name: rename-${{ matrix.os }}-directory-access-${{ github.run_attempt }}
           path: |
             metadata/
             results/*.md
             results/*.csv
             results/**/*.log
+            results-depth/*.json
+            results-depth/*.md
+            results-depth/*.csv
+            results-depth/**/*.json
+            results-depth/**/*.csv
+            results-depth/**/*.log
             results-msys-*/*.csv
             results-msys-*/*.txt
             results-msys-*/**/*.log
