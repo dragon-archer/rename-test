@@ -51,17 +51,9 @@ jobs:
             runner_label = $env:RUNNER_LABEL
             runner_image = $env:ImageOS
             image_version = $env:ImageVersion
-            os_caption = (Get-CimInstance Win32_OperatingSystem).Caption
             windows_build = "$($windows.CurrentBuildNumber).$($windows.UBR)"
-            display_version = $windows.DisplayVersion
-            powershell_version = $PSVersionTable.PSVersion.ToString()
-            runner_name = $env:RUNNER_NAME
             processor_count = [Environment]::ProcessorCount
-            scanner_counts = @(16, 0, 1, 4)
-            rename_methods = @('movefile', 'infoex', 'posix')
-            visual_studio = $installation
             msvc_tools_version = $env:VCToolsVersion
-            compiler_path = (Get-Command cl.exe).Source
             source_sha256 = (Get-FileHash rename-win32.c).Hash
             executable_sha256 = (Get-FileHash build/rename-win32.exe).Hash
             workspace = $env:GITHUB_WORKSPACE
@@ -79,12 +71,8 @@ jobs:
           name: rename-${{ matrix.os }}-${{ github.run_attempt }}
           path: |
             metadata/
-            results/summary.md
-            results/results.csv
-            results/environment.json
-            results/run-*/stdout.log
-            results/run-*/stderr.log
-            results/run-*/scanner-*-stdout.log
-            results/run-*/scanner-*-stderr.log
+            results/*.md
+            results/*.csv
+            results/**/*.log
             build/rename-win32.exe
           if-no-files-found: warn
