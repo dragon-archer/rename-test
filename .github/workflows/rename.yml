@@ -48,7 +48,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
-          New-Item -ItemType Directory -Path build, metadata | Out-Null
+          New-Item -ItemType Directory -Force -Path build, metadata | Out-Null
           $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
           $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $installation) { throw 'MSVC installation not found.' }
@@ -92,7 +92,13 @@ jobs:
 
       - name: Record final Defender state and validate treatment
         if: always()
-        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase after
+        run: |
+          if ('${{ steps.defender.outcome }}' -eq 'success') {
+            ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase after
+          } else {
+            Write-Warning 'Defender configuration did not succeed; recording status without validating treatment.'
+            ./ci-defender.ps1 -State as-is -Phase after
+          }
 
       - name: Upload logs, frequency summary and executable
         if: always()
