@@ -1,4 +1,4 @@
-name: Windows rename pressure and POSIX comparison
+name: Windows rename, Defender and MSYS build comparison
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       runs:
-        description: Runs per pressure/API group (1-100, at most 100 rounds each; 16 scanners always retained)
+        description: Runs per pressure/API and MSYS build group (1-100; 16 scanners retained)
         type: number
         default: 20
         required: true
@@ -16,22 +16,33 @@ permissions:
 
 jobs:
   rename:
-    name: MSVC pressure + POSIX / ${{ matrix.os }}
+    name: ${{ matrix.os }} / Defender ${{ matrix.defender }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025, windows-latest]
+        defender: [as-is, 'on', 'off']
     defaults:
       run:
         shell: pwsh
     env:
-      RUNNER_LABEL: ${{ matrix.os }}
+      RUNNER_LABEL: ${{ matrix.os }} / Defender ${{ matrix.defender }}
       TEST_RUNS: ${{ inputs.runs || 20 }}
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Record original Defender state (hosted CI only)
+        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase before
+
+      - name: Install MSYS build tools
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: gcc make libtool
 
       - name: Build with MSVC and record environment
         run: |
@@ -49,6 +60,7 @@ jobs:
           $windows = Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion'
           [pscustomobject]@{
             runner_label = $env:RUNNER_LABEL
+            defender_requested = '${{ matrix.defender }}'
             runner_image = $env:ImageOS
             image_version = $env:ImageVersion
             windows_build = "$($windows.CurrentBuildNumber).$($windows.UBR)"
@@ -61,18 +73,39 @@ jobs:
           } | ConvertTo-Json -Depth 3 | Set-Content metadata/environment.json
           Get-Content metadata/environment.json, metadata/dependencies.txt
 
+      - name: Configure and verify Defender experiment
+        id: defender
+        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase configure
+
       - name: High-pressure reproduction first, then pressure and POSIX comparison
         run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS) -ScannerCounts 16,0,1,4
+
+      - name: MSYS make and libtool build, serial, no artificial scanner
+        if: ${{ !cancelled() && steps.defender.outcome == 'success' }}
+        shell: msys2 {0}
+        run: /usr/bin/bash ./run-msys-build.sh "$TEST_RUNS" 1 results-msys-j1
+
+      - name: MSYS make and libtool build, parallel, no artificial scanner
+        if: ${{ !cancelled() && steps.defender.outcome == 'success' }}
+        shell: msys2 {0}
+        run: /usr/bin/bash ./run-msys-build.sh "$TEST_RUNS" 8 results-msys-j8
+
+      - name: Record final Defender state and validate treatment
+        if: always()
+        run: ./ci-defender.ps1 -State '${{ matrix.defender }}' -Phase after
 
       - name: Upload logs, frequency summary and executable
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rename-${{ matrix.os }}-${{ github.run_attempt }}
+          name: rename-${{ matrix.os }}-defender-${{ matrix.defender }}-${{ github.run_attempt }}
           path: |
             metadata/
             results/*.md
             results/*.csv
             results/**/*.log
+            results-msys-*/*.csv
+            results-msys-*/*.txt
+            results-msys-*/**/*.log
             build/rename-win32.exe
           if-no-files-found: warn

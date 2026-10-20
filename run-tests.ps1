@@ -128,9 +128,9 @@ foreach ($count in $ScannerCounts) {
         $valid = @($group | Where-Object outcome -eq 'completed')
         $failed = @($valid | Where-Object denied -gt 0).Count
         $unsupported = @($group | Where-Object outcome -eq 'unsupported').Count
-        $attempts = ($valid | Measure-Object attempts -Sum).Sum
-        $denied = ($valid | Measure-Object denied -Sum).Sum
-        $other = ($valid | Measure-Object other -Sum).Sum
+        $attempts = [long]($valid | Measure-Object attempts -Sum).Sum
+        $denied = [long]($valid | Measure-Object denied -Sum).Sum
+        $other = [long]($valid | Measure-Object other -Sum).Sum
         $rate = if ($attempts) { '{0:P1}' -f ($denied / $attempts) } else { 'N/A' }
         $summary += "| $count | $method | $failed / $($valid.Count) | $denied / $attempts | $rate | $other | $unsupported |"
     }
