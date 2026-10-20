@@ -1,4 +1,4 @@
-name: Native Windows rename reproduction
+name: Windows rename pressure and POSIX comparison
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       runs:
-        description: Process runs per OS (1-100; each process runs at most 100 rounds)
+        description: Runs per pressure/API group (1-100, at most 100 rounds each; 16 scanners always retained)
         type: number
         default: 20
         required: true
@@ -16,9 +16,9 @@ permissions:
 
 jobs:
   rename:
-    name: MSVC x64 / ${{ matrix.os }}
+    name: MSVC pressure + POSIX / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +42,7 @@ jobs:
           $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (-not $installation) { throw 'MSVC installation not found.' }
           & "$installation/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
-          & cl.exe /nologo /O2 /W4 /WX /TC /Fe:build/rename-win32.exe /Fo:build/rename-win32.obj rename-win32.c 2>&1 | Tee-Object -FilePath metadata/build.log
+          & cl.exe /nologo /O2 /W4 /WX /std:c11 /TC /Fe:build/rename-win32.exe /Fo:build/rename-win32.obj rename-win32.c 2>&1 | Tee-Object -FilePath metadata/build.log
           if ($LASTEXITCODE -ne 0) { throw "MSVC failed with exit code $LASTEXITCODE" }
           & dumpbin.exe /nologo /dependents build/rename-win32.exe | Set-Content metadata/dependencies.txt
           if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed.' }
@@ -55,6 +55,10 @@ jobs:
             windows_build = "$($windows.CurrentBuildNumber).$($windows.UBR)"
             display_version = $windows.DisplayVersion
             powershell_version = $PSVersionTable.PSVersion.ToString()
+            runner_name = $env:RUNNER_NAME
+            processor_count = [Environment]::ProcessorCount
+            scanner_counts = @(16, 0, 1, 4)
+            rename_methods = @('movefile', 'infoex', 'posix')
             visual_studio = $installation
             msvc_tools_version = $env:VCToolsVersion
             compiler_path = (Get-Command cl.exe).Source
@@ -65,8 +69,8 @@ jobs:
           } | ConvertTo-Json -Depth 3 | Set-Content metadata/environment.json
           Get-Content metadata/environment.json, metadata/dependencies.txt
 
-      - name: Repeat the native executable
-        run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS)
+      - name: High-pressure reproduction first, then pressure and POSIX comparison
+        run: ./run-tests.ps1 -Runs ([int]$env:TEST_RUNS) -ScannerCounts 16,0,1,4
 
       - name: Upload logs, frequency summary and executable
         if: always()
@@ -77,7 +81,10 @@ jobs:
             metadata/
             results/summary.md
             results/results.csv
+            results/environment.json
             results/run-*/stdout.log
             results/run-*/stderr.log
+            results/run-*/scanner-*-stdout.log
+            results/run-*/scanner-*-stderr.log
             build/rename-win32.exe
           if-no-files-found: warn
